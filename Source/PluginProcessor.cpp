@@ -22,6 +22,25 @@ MultiBandCompressorAudioProcessor::MultiBandCompressorAudioProcessor()
                        )
 #endif
 {
+     // pointers are stored as ranged audio parameters, base class that these parameters come from.
+    // we need to cast these ranged audio parameters to the correct type before we can assign them to the cached instanses that we declared.
+    
+    attack = dynamic_cast<juce::AudioParameterFloat*>(apvts.getParameter("Attack"));
+    jassert(attack != nullptr); // in case we typed the parameter name incorrectly. The get function will return a nullptr if the name we provided is not found in the
+    
+    release = dynamic_cast<juce::AudioParameterFloat*>(apvts.getParameter("Release"));
+    jassert(release != nullptr);
+    
+    threshold = dynamic_cast<juce::AudioParameterFloat*>(apvts.getParameter("Threshold"));
+    jassert(threshold != nullptr);
+    
+    ratio = dynamic_cast<juce::AudioParameterChoice*>(apvts.getParameter("Ratio"));
+    jassert(ratio != nullptr);
+    
+    bypassed = dynamic_cast<juce::AudioParameterBool*>(apvts.getParameter("Bypassed"));
+    jassert(ratio != nullptr);
+    
+    
 }
 
 MultiBandCompressorAudioProcessor::~MultiBandCompressorAudioProcessor()
@@ -95,6 +114,14 @@ void MultiBandCompressorAudioProcessor::prepareToPlay (double sampleRate, int sa
 {
     // Use this method as the place to do any pre-playback
     // initialisation that you need..
+    
+    juce::dsp::ProcessSpec spec; // we need to prepare the compress by passing a ProcessSpec to it
+    spec.maximumBlockSize = samplesPerBlock; // needs to know the maximum number of samples
+    spec.numChannels = getTotalNumOutputChannels(); // needs to know the number of channels
+    spec.sampleRate = sampleRate; // sample rate to be passed to compressor
+    
+    // we can now pass these values to the compressor
+    compressor.prepare(spec);
 }
 
 void MultiBandCompressorAudioProcessor::releaseResources()
@@ -144,18 +171,32 @@ void MultiBandCompressorAudioProcessor::processBlock (juce::AudioBuffer<float>& 
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    // This is the place where you'd normally do the guts of your plugin's
-    // audio processing...
-    // Make sure to reset the state if your inner loop is processing
-    // the samples and the outer loop is handling the channels.
-    // Alternatively, you can process the samples with the channels
-    // interleaved by keeping the same state.
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
-    {
-        auto* channelData = buffer.getWritePointer (channel);
+    
+    // using get function to get the value from the parameter layout 
+    // float have a get function that we can use, and we need to call the apppropriate compressor value with this parameter value
+    compressor.setAttack(attack->get());
+    compressor.setRelease(release->get());
+    compressor.setThreshold(threshold->get());
+    
+    // the ratio is stored in a string array, and we need float value of the choice from the string, and we use a helper function in the string class to get it. (getFloatValue)
+    compressor.setRatio(ratio->getCurrentChoiceName().getFloatValue() );
+    
+    // we also need to initialize the member variables pointers so that they aren't null.
+    
+    
+    // the compressor needs a context, so we need to create an audioBlock (using the buffer in this function).
+    auto block = juce::dsp::AudioBlock<float>(buffer); // creating an audioBlock
+    auto context = juce::dsp::ProcessContextReplacing<float>(block); // create context
+    
+    // For the Bypass button: we can toggle whether the audio is processed or not by setting the "is bypassed flag" on the context
+    context.isBypassed = bypassed->get();
+    
+    
+    compressor.process(context);
+    
 
-        // ..do something to the data...
-    }
+    
+    
 }
 
 //==============================================================================
@@ -166,7 +207,9 @@ bool MultiBandCompressorAudioProcessor::hasEditor() const
 
 juce::AudioProcessorEditor* MultiBandCompressorAudioProcessor::createEditor()
 {
-    return new MultiBandCompressorAudioProcessorEditor (*this);
+   // return new MultiBandCompressorAudioProcessorEditor (*this);
+    
+    return new juce::GenericAudioProcessorEditor(*this);
 }
 
 //==============================================================================
@@ -175,12 +218,70 @@ void MultiBandCompressorAudioProcessor::getStateInformation (juce::MemoryBlock& 
     // You should use this method to store your parameters in the memory block.
     // You could do that either as raw data, or use the XML or ValueTree classes
     // as intermediaries to make it easy to save and load complex data.
+    
+    juce::MemoryOutputStream mos(destData, true); // creating memory stream to save and load parameters data
+    apvts.state.writeToStream(mos); // writing to memory output stream
+}
+
+juce::AudioProcessorValueTreeState::ParameterLayout MultiBandCompressorAudioProcessor::createParameterLayout()
+{
+    APVTS::ParameterLayout layout;
+    
+    using namespace juce;
+    
+    layout.add(std::make_unique<AudioParameterFloat>("Threshold",
+                                                    "Threshold",
+                                                     NormalisableRange<float>(-60, 12, 1, 1), 0)); // Rangestart, range end, interval, skew factor, default value.
+    
+    auto attackReleaseRange = NormalisableRange<float>(5, 500, 1, 1);
+    
+    layout.add(std::make_unique<AudioParameterFloat>("Attack",
+                                                     "Attack",
+                                                     attackReleaseRange,
+                                                     50)); // milliseconds
+    
+    layout.add(std::make_unique<AudioParameterFloat>("Release",
+                                                     "Release",
+                                                     attackReleaseRange,
+                                                     250)); // milliseconds
+    
+    
+    
+    // AudioParameter Choice requires a juce::StringArray as a constructor argument
+    
+    auto choices = std::vector<double>{1, 1.5, 2, 3, 4, 5, 6, 7, 8, 10, 15, 20, 50, 100}; // different choices of ratio values, hardcoded
+    
+    juce::StringArray stringArray;
+    
+    for (auto choice : choices) // convert choices into string juce objects
+    {
+        stringArray.add (juce::String(choice, 1)); // 1 is number of decimal places
+    }
+    
+    layout.add(std::make_unique<AudioParameterChoice>("Ratio", "Ratio", stringArray, 3)); // 3 is defalut value
+    
+    
+    
+    
+    // bypass button
+    layout.add(std::make_unique<AudioParameterBool>("Bypassed", "Bypassed", false)); // false meaning it is default as false (not bypassed)
+    
+    
+    
+    return layout;
 }
 
 void MultiBandCompressorAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     // You should use this method to restore your parameters from this memory block,
     // whose contents will have been created by the getStateInformation() call.
+    
+    auto tree = juce::ValueTree::readFromData(data, sizeInBytes); // to restore memory from parameters
+    if (tree.isValid()) // we need to check if the tree is valid before copy it into valueTreeState
+    {
+        apvts.replaceState(tree);
+    }
+    
 }
 
 //==============================================================================
